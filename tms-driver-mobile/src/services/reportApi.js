@@ -111,8 +111,26 @@ export function hasOrderSupplement(records, orderNumber) {
   return records.some(
     (record) =>
       record.orderNumber === orderNumber &&
-      ((record.remarks && record.remarks.trim()) || (record.images && record.images.length > 0)),
+      (record.supplementUpdatedAt ||
+        (record.remarks && record.remarks.trim()) ||
+        (record.images && record.images.length > 0)),
   )
+}
+
+export function getLatestSupplementRecord(records, orderNumber) {
+  return records
+    .filter(
+      (record) =>
+        record.orderNumber === orderNumber &&
+        (record.supplementUpdatedAt ||
+          (record.remarks && record.remarks.trim()) ||
+          (record.images && record.images.length > 0)),
+    )
+    .sort((left, right) => {
+      const leftTimestamp = left.supplementUpdatedAt ?? left.createdAt
+      const rightTimestamp = right.supplementUpdatedAt ?? right.createdAt
+      return new Date(rightTimestamp) - new Date(leftTimestamp)
+    })[0]
 }
 
 function completeOrderSupplement(records, orderNumber) {
@@ -169,11 +187,15 @@ export async function createReport(reportData) {
     (safeReportData.images && safeReportData.images.length > 0)
   const calculatedStatus =
     currentSubmissionHasSupplement || orderAlreadySupplemented ? 'completed' : 'pending'
+  const createdAt = new Date().toISOString()
+  const nextSupplementUpdatedAt =
+    safeReportData.supplementUpdatedAt ?? (currentSubmissionHasSupplement ? createdAt : undefined)
   const createdRecord = {
     id: createId(),
-    createdAt: new Date().toISOString(),
+    createdAt,
     reportResult: null,
     ...safeReportData,
+    ...(nextSupplementUpdatedAt ? { supplementUpdatedAt: nextSupplementUpdatedAt } : {}),
     status: calculatedStatus,
   }
 
@@ -225,22 +247,23 @@ export async function completeOrderSupplementRecords(orderNumber, supplementData
   await delay()
 
   const records = readReportsFromStorage()
+  const latestSupplementRecord = getLatestSupplementRecord(records, orderNumber)
   const latestOrderRecord = records
     .filter((record) => record.orderNumber === orderNumber)
     .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))[0]
+  const targetRecordId = latestSupplementRecord?.id ?? latestOrderRecord?.id
+  const supplementUpdatedAt = new Date().toISOString()
 
   const supplementedRecords = records.map((record) => {
-    if (record.id !== latestOrderRecord?.id) {
+    if (record.id !== targetRecordId) {
       return record
     }
 
     return {
       ...record,
-      remarks:
-        supplementData.remarks && supplementData.remarks.trim()
-          ? supplementData.remarks
-          : record.remarks,
-      images: supplementData.images && supplementData.images.length ? supplementData.images : record.images,
+      remarks: supplementData.remarks !== undefined ? supplementData.remarks : record.remarks,
+      images: supplementData.images !== undefined ? supplementData.images : record.images,
+      supplementUpdatedAt,
     }
   })
   const finalizedRecords = completeOrderSupplement(supplementedRecords, orderNumber)

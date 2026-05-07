@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   completeOrderSupplementRecords,
   createReport,
+  getLatestSupplementRecord,
   getReports,
-  hasOrderSupplement,
 } from './services/reportApi'
 
 const activeCompany = 'companyC'
@@ -28,6 +28,11 @@ const createEmptyReport = () => ({
   images: [],
 })
 
+const createEmptyOriginalSupplement = () => ({
+  remarks: '',
+  images: [],
+})
+
 function formatCopy(template, values) {
   return Object.entries(values).reduce(
     (result, [key, value]) => result.replace(`{${key}}`, value),
@@ -44,12 +49,27 @@ function getImageStatusSummary(images) {
     }))
 }
 
-function formatEventTime(timestamp, language) {
-  return new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(new Date(timestamp))
+function createStoredImagePreview(name) {
+  const label = encodeURIComponent(name || 'Image')
+  return `data:image/svg+xml;utf8,${`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" rx="18" fill="#dbeafe"/><text x="60" y="64" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0f172a">${label}</text></svg>`}`
+}
+
+function normalizeStoredImages(images) {
+  return (images ?? []).map((image, index) => ({
+    id: image.id ?? `stored-${index}-${image.name ?? 'image'}`,
+    name: image.name ?? `image-${index + 1}`,
+    previewUrl: image.previewUrl ?? createStoredImagePreview(image.name),
+    status: 'success',
+  }))
+}
+
+function getComparableImages(images) {
+  return images
+    .filter((image) => image.status === 'success')
+    .map((image) => ({
+      id: image.id,
+      name: image.name,
+    }))
 }
 
 function formatEventDateTime(timestamp, language) {
@@ -66,31 +86,6 @@ function getLatestRecord(records, node) {
   return records
     .filter((record) => record.reportNode === node)
     .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))[0]
-}
-
-function getOrderStatus(records, companyKey) {
-  const latestArrival = getLatestRecord(records, 'arrival')
-  const latestDeparture = getLatestRecord(records, 'departure')
-
-  if (companyKey === 'companyA') {
-    if (!latestArrival?.reportResult) {
-      return 'in-progress'
-    }
-    return latestArrival.reportResult
-  }
-
-  if (companyKey === 'companyB') {
-    if (!latestDeparture?.reportResult) {
-      return 'in-progress'
-    }
-    return latestDeparture.reportResult
-  }
-
-  if (!latestDeparture?.reportResult) {
-    return 'in-progress'
-  }
-
-  return latestDeparture.reportResult
 }
 
 function getNodeOptionsForOrder(records, companyKey, text) {
@@ -196,87 +191,87 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
   const [toastMessage, setToastMessage] = useState('')
   const [showToast, setShowToast] = useState(false)
   const [eventRecords, setEventRecords] = useState([])
-  const [showIncompleteList, setShowIncompleteList] = useState(false)
-  const [activeSupplementOrder, setActiveSupplementOrder] = useState('')
+  const [showHistoryList, setShowHistoryList] = useState(false)
+  const [activeOrderNumber, setActiveOrderNumber] = useState('')
+  const [originalHistorySupplement, setOriginalHistorySupplement] = useState(
+    createEmptyOriginalSupplement,
+  )
 
   const uploadTimersRef = useRef(new Map())
   const toastTimerRef = useRef(null)
   const fileInputRef = useRef(null)
   const imagesRef = useRef([])
 
-  const incompleteOrders = useMemo(() => {
+  const historyOrders = useMemo(() => {
     const todayKey = new Date().toISOString().slice(0, 10)
-    const pendingByOrder = new Map()
+    const recordsByOrder = new Map()
 
     eventRecords.forEach((record) => {
       if (record.createdAt.slice(0, 10) !== todayKey) {
         return
       }
 
-      if (hasOrderSupplement(eventRecords, record.orderNumber)) {
-        return
+      if (!recordsByOrder.has(record.orderNumber)) {
+        recordsByOrder.set(record.orderNumber, [])
       }
 
-      if (record.status !== 'pending') {
-        return
-      }
-
-      if (!pendingByOrder.has(record.orderNumber)) {
-        pendingByOrder.set(record.orderNumber, [])
-      }
-
-      pendingByOrder.get(record.orderNumber).push(record)
+      recordsByOrder.get(record.orderNumber).push(record)
     })
 
-    return Array.from(pendingByOrder.entries())
-      .map(([orderNumber, records]) => ({
-        orderNumber,
-        records: records.sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt)),
-        latestCreatedAt: records.reduce(
-          (latest, record) =>
-            new Date(record.createdAt) > new Date(latest) ? record.createdAt : latest,
-          records[0]?.createdAt ?? '',
-        ),
-      }))
+    return Array.from(recordsByOrder.entries())
+      .map(([orderNumber, records]) => {
+        const sortedRecords = records.sort(
+          (left, right) => new Date(right.createdAt) - new Date(left.createdAt),
+        )
+
+        return {
+          orderNumber,
+          records: sortedRecords,
+          latestCreatedAt: sortedRecords[0]?.createdAt ?? '',
+        }
+      })
       .sort((left, right) => new Date(right.latestCreatedAt) - new Date(left.latestCreatedAt))
   }, [eventRecords])
-  const pendingCount = incompleteOrders.length
-  const pendingOrderGroups = incompleteOrders.slice(0, 3)
-  const isEditingIncomplete = Boolean(activeSupplementOrder)
+
+  const historyCount = historyOrders.length
+  const isViewingHistoryOrder = Boolean(activeOrderNumber)
   const successfulImageCount = report.images.filter((image) => image.status === 'success').length
   const hasRemarks = report.remarks.trim().length > 0
-  const hasSupplement = hasRemarks || successfulImageCount > 0
+  const hasSupplementContent = hasRemarks || successfulImageCount > 0
   const uploadCountText = formatCopy(text.report.uploadCount, {
     count: String(report.images.length),
   })
 
   const orderRecords = useMemo(() => {
-    const normalizedOrderNumber = isEditingIncomplete
-      ? activeSupplementOrder.trim()
+    const normalizedOrderNumber = isViewingHistoryOrder
+      ? activeOrderNumber.trim()
       : report.orderNumber.trim()
+
     if (!normalizedOrderNumber) {
       return []
     }
 
     return eventRecords.filter((record) => record.orderNumber === normalizedOrderNumber)
-  }, [activeSupplementOrder, eventRecords, isEditingIncomplete, report.orderNumber])
+  }, [activeOrderNumber, eventRecords, isViewingHistoryOrder, report.orderNumber])
 
   const nodeOptions = useMemo(
     () => getNodeOptionsForOrder(orderRecords, activeCompany, text),
     [orderRecords, text],
   )
   const hasBaseFields = report.orderNumber.trim() && report.reportNode
-  const canSubmit = isEditingIncomplete ? hasSupplement : hasBaseFields
+  const isSupplementDirty =
+    report.remarks !== originalHistorySupplement.remarks ||
+    JSON.stringify(getComparableImages(report.images)) !==
+      JSON.stringify(originalHistorySupplement.images)
+  const canSubmit = isViewingHistoryOrder
+    ? Boolean(report.reportNode) || isSupplementDirty
+    : Boolean(hasBaseFields)
   const summaryArrivalRecord = useMemo(
     () => getLatestRecord(orderRecords, 'arrival'),
     [orderRecords],
   )
   const summaryDepartureRecord = useMemo(
     () => getLatestRecord(orderRecords, 'departure'),
-    [orderRecords],
-  )
-  const _currentOrderStatus = useMemo(
-    () => getOrderStatus(orderRecords, activeCompany),
     [orderRecords],
   )
   const remarksPlaceholder =
@@ -307,20 +302,20 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
     return () => {
       uploadTimersRef.current.forEach((timerId) => window.clearTimeout(timerId))
       uploadTimersRef.current.clear()
+
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current)
       }
+
       imagesRef.current.forEach((image) => {
-        URL.revokeObjectURL(image.previewUrl)
+        if (image.previewUrl?.startsWith('blob:')) {
+          URL.revokeObjectURL(image.previewUrl)
+        }
       })
     }
   }, [])
 
   useEffect(() => {
-    if (isEditingIncomplete) {
-      return
-    }
-
     if (!report.reportNode) {
       return
     }
@@ -332,7 +327,7 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
         reportNode: '',
       }))
     }
-  }, [isEditingIncomplete, nodeOptions, report.reportNode])
+  }, [nodeOptions, report.reportNode])
 
   const refreshReports = async () => {
     const reports = await getReports()
@@ -364,7 +359,9 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
   const releaseImages = (images) => {
     images.forEach((image) => {
       clearUploadTask(image.id)
-      URL.revokeObjectURL(image.previewUrl)
+      if (image.previewUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(image.previewUrl)
+      }
     })
   }
 
@@ -373,6 +370,7 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
       releaseImages(current.images)
       return createEmptyReport()
     })
+    setOriginalHistorySupplement(createEmptyOriginalSupplement())
     setUploadError('')
     setIsSubmitting(false)
   }
@@ -447,9 +445,12 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
   const handleRemoveImage = (imageId) => {
     setReport((current) => {
       const imageToRemove = current.images.find((image) => image.id === imageId)
+
       if (imageToRemove) {
         clearUploadTask(imageId)
-        URL.revokeObjectURL(imageToRemove.previewUrl)
+        if (imageToRemove.previewUrl?.startsWith('blob:')) {
+          URL.revokeObjectURL(imageToRemove.previewUrl)
+        }
       }
 
       return {
@@ -460,43 +461,67 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
   }
 
   const handleSelectNode = (nextNode) => {
-    if (isEditingIncomplete) {
-      return
-    }
-
     setReport((current) => ({
       ...current,
       reportNode: nextNode,
     }))
   }
 
-  const handleBannerToggle = () => {
-    if (!pendingCount) {
+  const handleHistoryToggle = () => {
+    if (!historyCount) {
       return
     }
 
-    setShowIncompleteList((current) => !current)
+    setShowHistoryList((current) => !current)
   }
 
   const handleBackToMainForm = () => {
-    if (isEditingIncomplete) {
-      setActiveSupplementOrder('')
+    if (isViewingHistoryOrder) {
+      setActiveOrderNumber('')
       resetForm()
     }
 
-    setShowIncompleteList(false)
+    setShowHistoryList(false)
   }
 
-  const handleLoadIncomplete = (orderNumber) => {
+  const handleLoadHistoryOrder = (orderNumber) => {
+    const latestSupplementRecord = getLatestSupplementRecord(eventRecords, orderNumber)
+    const normalizedImages = normalizeStoredImages(latestSupplementRecord?.images)
+
     resetForm()
-    setActiveSupplementOrder(orderNumber)
-    setShowIncompleteList(false)
-    setReport({
-      orderNumber: orderNumber,
-      reportNode: '',
-      remarks: '',
-      images: [],
+    setActiveOrderNumber(orderNumber)
+    setShowHistoryList(false)
+    setOriginalHistorySupplement({
+      remarks: latestSupplementRecord?.remarks ?? '',
+      images: getComparableImages(normalizedImages),
     })
+    setReport({
+      orderNumber,
+      reportNode: '',
+      remarks: latestSupplementRecord?.remarks ?? '',
+      images: normalizedImages,
+    })
+  }
+
+  const handleOrderNumberChange = (value) => {
+    const normalizedOrderNumber = value.trim()
+    const matchedHistoryOrder = historyOrders.find(
+      (historyOrder) => historyOrder.orderNumber === normalizedOrderNumber,
+    )
+
+    setReport((current) => ({
+      ...current,
+      orderNumber: value,
+    }))
+
+    if (matchedHistoryOrder) {
+      handleLoadHistoryOrder(matchedHistoryOrder.orderNumber)
+      return
+    }
+
+    if (!normalizedOrderNumber || activeOrderNumber === normalizedOrderNumber) {
+      setActiveOrderNumber('')
+    }
   }
 
   const handleSubmit = async (event) => {
@@ -511,15 +536,11 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
     setIsSubmitting(true)
 
     try {
-      if (isEditingIncomplete) {
-        await completeOrderSupplementRecords(activeSupplementOrder, {
+      if (isViewingHistoryOrder && !report.reportNode) {
+        await completeOrderSupplementRecords(activeOrderNumber, {
           remarks: report.remarks.trim(),
           images: successfulImages,
         })
-        await refreshReports()
-        resetForm()
-        setActiveSupplementOrder('')
-        showToastMessage(text.report.successToast)
       } else {
         await createReport({
           orderNumber: report.orderNumber.trim(),
@@ -527,11 +548,13 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
           reportResult: null,
           remarks: report.remarks.trim(),
           images: successfulImages,
+          ...(isViewingHistoryOrder ? { supplementUpdatedAt: new Date().toISOString() } : {}),
         })
-        await refreshReports()
-        resetForm()
-        showToastMessage(hasOptionalContent ? text.report.successToast : text.report.pendingToast)
       }
+      await refreshReports()
+      resetForm()
+      setActiveOrderNumber('')
+      showToastMessage(hasOptionalContent ? text.report.successToast : text.report.pendingToast)
     } catch (error) {
       console.error('Failed to submit report', error)
       setIsSubmitting(false)
@@ -569,29 +592,29 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
         </button>
       </header>
 
-      {pendingCount > 0 && (
+      {historyCount > 0 && (
         <section className="card recent-section">
-          <button className="recent-section-header" type="button" onClick={handleBannerToggle}>
+          <button className="recent-section-header" type="button" onClick={handleHistoryToggle}>
             <div className="recent-section-header-copy">
               <span className="incomplete-banner-copy">
-                {formatCopy(text.report.recentBanner, { count: String(pendingCount) })}
+                {formatCopy(text.report.recentBanner, { count: String(historyCount) })}
               </span>
             </div>
             <span className="incomplete-banner-toggle" aria-hidden="true">
-              {showIncompleteList ? '^' : 'v'}
+              {showHistoryList ? '^' : 'v'}
             </span>
           </button>
 
-          <div className={`recent-sheet-wrap ${showIncompleteList ? 'is-open' : ''}`}>
+          <div className={`recent-sheet-wrap ${showHistoryList ? 'is-open' : ''}`}>
             <div className="recent-sheet">
-              {pendingOrderGroups.length ? (
+              {historyOrders.length ? (
                 <div className="recent-list">
-                  {pendingOrderGroups.map((group) => (
+                  {historyOrders.map((group) => (
                     <button
                       key={group.orderNumber}
                       className="recent-item"
                       type="button"
-                      onClick={() => handleLoadIncomplete(group.orderNumber)}
+                      onClick={() => handleLoadHistoryOrder(group.orderNumber)}
                     >
                       <div className="recent-item-main">
                         <div className="recent-item-copy">
@@ -620,20 +643,15 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
               className="text-input text-input-with-icon"
               type="text"
               value={report.orderNumber}
-              onChange={(event) =>
-                setReport((current) => ({
-                  ...current,
-                  orderNumber: event.target.value,
-                }))
-              }
+              onChange={(event) => handleOrderNumberChange(event.target.value)}
               placeholder={text.report.orderPlaceholder}
-              disabled={isEditingIncomplete}
+              disabled={isViewingHistoryOrder}
             />
             <button
               className="field-action-button"
               type="button"
               onClick={() => console.log('scan triggered')}
-              disabled={isEditingIncomplete}
+              disabled={isViewingHistoryOrder}
               aria-label="Scan order number"
             >
               <ScanIcon />
@@ -641,29 +659,27 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
           </div>
         </label>
 
-        {!isEditingIncomplete && (
-          <div className="field">
-            <div className="type-card-group">
-              {nodeOptions.map((option) => (
-                <button
-                  key={option.value}
-                  className={`type-card ${report.reportNode === option.value ? 'is-selected' : ''}`}
-                  type="button"
-                  onClick={() => handleSelectNode(option.value)}
-                >
-                  <span className="type-card-icon">
-                    {option.value === 'arrival' ? <ArrivalIcon /> : <DepartureIcon />}
-                  </span>
-                  <span className="type-card-copy">
-                    <span className="type-card-title">{option.label}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
+        <div className="field">
+          <div className="type-card-group">
+            {nodeOptions.map((option) => (
+              <button
+                key={option.value}
+                className={`type-card ${report.reportNode === option.value ? 'is-selected' : ''}`}
+                type="button"
+                onClick={() => handleSelectNode(option.value)}
+              >
+                <span className="type-card-icon">
+                  {option.value === 'arrival' ? <ArrivalIcon /> : <DepartureIcon />}
+                </span>
+                <span className="type-card-copy">
+                  <span className="type-card-title">{option.label}</span>
+                </span>
+              </button>
+            ))}
           </div>
-        )}
+        </div>
 
-        {isEditingIncomplete && (
+        {isViewingHistoryOrder && (
           <div className="field">
             <div className="supplement-summary">
               {summaryArrivalRecord && (
@@ -790,13 +806,9 @@ function ReportPage({ driver, onSignOut, language, onLanguageChange, text }) {
           {uploadError && <p className="status-banner status-banner-error">{uploadError}</p>}
         </div>
 
-        {isEditingIncomplete && !hasSupplement && (
-          <p className="field-helper-text">{text.report.supplementRequiredHelper}</p>
-        )}
-
         <div className="sticky-submit">
           <div className="form-action-bar">
-            {isEditingIncomplete && (
+            {isViewingHistoryOrder && (
               <button
                 className="secondary-action-button"
                 type="button"

@@ -574,7 +574,13 @@ h2 {
 }
 
 .recent-sheet-wrap.is-open {
-  max-height: 320px;
+  max-height: 220px;
+}
+
+.recent-sheet-wrap.is-open .recent-sheet {
+  max-height: 172px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .recent-section-title {
